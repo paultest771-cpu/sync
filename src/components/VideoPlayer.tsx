@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { Play, Pause, Volume2, VolumeX, Maximize2, Users, Wifi } from 'lucide-react';
+import { Play, Pause, Volume2, VolumeX, Maximize2, Users, Wifi, ExternalLink, AlertCircle, Play as PlayIcon } from 'lucide-react';
 import { supabase, PlaybackState } from '../lib/supabase';
 
 interface VideoPlayerProps {
@@ -27,6 +27,74 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
   const lastBroadcast = useRef(0);
   const localAction = useRef(false);
 
+  const [isEmbedded, setIsEmbedded] = useState(false);
+
+  const getEmbedUrl = (url: string): { embedUrl: string; isEmbed: boolean } => {
+    try {
+      const urlObj = new URL(url);
+
+      // Google Drive
+      if (urlObj.hostname.includes('drive.google.com')) {
+        const fileIdMatch = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+        if (fileIdMatch) {
+          return {
+            embedUrl: `https://drive.google.com/file/d/${fileIdMatch[1]}/preview`,
+            isEmbed: true
+          };
+        }
+      }
+
+      // Dropbox - convert to direct link
+      if (urlObj.hostname.includes('dropbox.com')) {
+        if (url.includes('dl=0') || url.includes('dl=1')) {
+          return {
+            embedUrl: url.replace(/dl=[01]/, 'dl=1').replace('www.dropbox.com', 'dl.dropboxusercontent.com'),
+            isEmbed: false
+          };
+        }
+        return {
+          embedUrl: url.replace('www.dropbox.com', 'dl.dropboxusercontent.com') + '?dl=1',
+          isEmbed: false
+        };
+      }
+
+      // OneDrive - get embed link
+      if (urlObj.hostname.includes('onedrive.live.com') || urlObj.hostname.includes('1drv.ms')) {
+        return {
+          embedUrl: url + (url.includes('?') ? '&' : '?') + 'action=embed',
+          isEmbed: true
+        };
+      }
+
+      // Youtube
+      if (urlObj.hostname.includes('youtube.com') || urlObj.hostname.includes('youtu.be')) {
+        const videoId = urlObj.hostname.includes('youtu.be')
+          ? urlObj.pathname.slice(1)
+          : urlObj.searchParams.get('v');
+        if (videoId) {
+          return {
+            embedUrl: `https://www.youtube-nocookie.com/embed/${videoId}`,
+            isEmbed: true
+          };
+        }
+      }
+
+      // Direct video URL
+      const videoExts = ['.mp4', '.webm', '.ogg', '.mov', '.avi', '.mkv'];
+      const isDirect = videoExts.some(ext => url.toLowerCase().includes(ext));
+      return { embedUrl: url, isEmbed: false };
+    } catch {
+      return { embedUrl: url, isEmbed: false };
+    }
+  };
+
+  const { embedUrl, isEmbed } = getEmbedUrl(videoUrl);
+  const [showControls, setShowControls] = useState(false);
+
+  useEffect(() => {
+    setIsEmbedded(isEmbed);
+  }, [isEmbed]);
+
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60);
     const sec = Math.floor(s % 60);
@@ -34,6 +102,8 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
   };
 
   const applyRemoteState = useCallback((state: PlaybackState) => {
+    if (isEmbedded) return;
+
     const video = videoRef.current;
     if (!video || localAction.current) return;
 
@@ -57,17 +127,19 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
       isSyncing.current = false;
       setSyncStatus('synced');
     }, 150);
-  }, []);
+  }, [isEmbedded]);
 
   const broadcast = useCallback((playing: boolean, position: number) => {
+    if (isEmbedded) return;
     channelRef.current?.send({
       type: 'broadcast',
       event: 'sync',
       payload: { is_playing: playing, position },
     });
-  }, []);
+  }, [isEmbedded]);
 
   const persist = useCallback(async (playing: boolean, position: number) => {
+    if (isEmbedded) return;
     const now = Date.now();
     if (now - lastBroadcast.current < 400) return;
     lastBroadcast.current = now;
@@ -78,9 +150,29 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
         { room_id: roomId, is_playing: playing, position, updated_at: new Date().toISOString() },
         { onConflict: 'room_id' }
       );
-  }, [roomId]);
+  }, [roomId, isEmbedded]);
 
   useEffect(() => {
+    if (isEmbedded) {
+      const channel = supabase.channel(`room:${roomId}`, {
+        config: { presence: { key: crypto.randomUUID() } },
+      });
+
+      channel
+        .on('presence', { event: 'sync' }, () => {
+          const state = channel.presenceState();
+          setViewerCount(Object.keys(state).length);
+        })
+        .subscribe(async (status) => {
+          if (status === 'SUBSCRIBED') {
+            await channel.track({ online_at: new Date().toISOString() });
+          }
+        });
+
+      channelRef.current = channel;
+      return () => { channel.unsubscribe(); };
+    }
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -126,9 +218,11 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
     return () => {
       channel.unsubscribe();
     };
-  }, [roomId, videoUrl, applyRemoteState]);
+  }, [roomId, videoUrl, applyRemoteState, isEmbedded]);
 
   const handlePlayPause = async () => {
+    if (isEmbedded) return;
+
     const video = videoRef.current;
     if (!video) return;
 
@@ -147,6 +241,8 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
   };
 
   const handleTimeUpdate = () => {
+    if (isEmbedded) return;
+
     const video = videoRef.current;
     if (!video) return;
     setCurrentTime(video.currentTime);
@@ -166,6 +262,8 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
   };
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isEmbedded) return;
+
     const video = videoRef.current;
     const bar = progressRef.current;
     if (!video || !bar) return;
@@ -184,6 +282,8 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
   };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isEmbedded) return;
+
     const v = parseFloat(e.target.value);
     if (videoRef.current) {
       videoRef.current.volume = v;
@@ -194,6 +294,8 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
   };
 
   const toggleMute = () => {
+    if (isEmbedded) return;
+
     const video = videoRef.current;
     if (!video) return;
     video.muted = !video.muted;
@@ -201,7 +303,7 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
   };
 
   const handleFullscreen = () => {
-    const container = videoRef.current?.parentElement;
+    const container = videoRef.current?.parentElement?.parentElement;
     if (!container) return;
     if (document.fullscreenElement) {
       document.exitFullscreen();
@@ -213,11 +315,56 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0;
 
+  // Embedded video (iframe)
+  if (isEmbedded) {
+    return (
+      <div className="w-full bg-black rounded-2xl overflow-hidden shadow-2xl relative">
+        <iframe
+          src={embedUrl}
+          className="w-full aspect-video"
+          allow="autoplay; fullscreen; picture-in-picture"
+          allowFullScreen
+        />
+
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 to-transparent px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <span className="text-white text-sm font-medium truncate max-w-xs">{videoName}</span>
+
+              <a
+                href={videoUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-sky-400 hover:text-sky-300 text-xs"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                In neuem Tab oeffnen
+              </a>
+            </div>
+
+            <div className="flex items-center gap-1.5 text-white/60 text-xs">
+              <Users className="w-3.5 h-3.5" />
+              <span>{viewerCount}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="absolute top-3 left-3">
+          <div className="bg-black/60 backdrop-blur-sm text-amber-300 text-xs px-2.5 py-1.5 rounded-lg flex items-center gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5" />
+            Sync nicht verfuegbar
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Native video player
   return (
     <div className="w-full bg-black rounded-2xl overflow-hidden shadow-2xl group relative">
       <video
         ref={videoRef}
-        src={videoUrl}
+        src={embedUrl}
         className="w-full aspect-video"
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={() => setDuration(videoRef.current?.duration ?? 0)}
@@ -228,6 +375,18 @@ export default function VideoPlayer({ roomId, videoUrl, videoName }: VideoPlayer
         playsInline
         preload="metadata"
       />
+
+      {/* Play overlay for paused state */}
+      {!isPlaying && (
+        <div
+          className="absolute inset-0 flex items-center justify-center bg-black/30 cursor-pointer"
+          onClick={handlePlayPause}
+        >
+          <div className="w-20 h-20 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center">
+            <PlayIcon className="w-10 h-10 text-white fill-white" />
+          </div>
+        </div>
+      )}
 
       <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-4 pt-10 pb-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
         <div
