@@ -15,12 +15,33 @@ export default function RoomPage({ roomId, onBack }: RoomPageProps) {
   const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('rooms')
       .select('*')
       .eq('id', roomId)
       .maybeSingle();
-    setRoom(data as Room | null);
+    if (error || !data) {
+      setRoom(null);
+      setLoading(false);
+      return;
+    }
+    setRoom(data as Room);
+
+    // Ensure playback_state exists (for late joins or rooms created before migration)
+    const { data: state } = await supabase
+      .from('playback_state')
+      .select('id')
+      .eq('room_id', roomId)
+      .maybeSingle();
+
+    if (!state) {
+      await supabase.from('playback_state').insert({
+        room_id: roomId,
+        is_playing: false,
+        position: 0,
+      });
+    }
+
     setLoading(false);
   }, [roomId]);
 
