@@ -1,5 +1,5 @@
 import { useState, useRef, DragEvent, ChangeEvent } from 'react';
-import { Upload, Film, Loader2, Link } from 'lucide-react';
+import { Upload, Film, Loader2, Link, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
 interface UploadZoneProps {
@@ -15,16 +15,33 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
   const [urlInput, setUrlInput] = useState('');
   const [urlName, setUrlName] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [errorDetails, setErrorDetails] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = async (file: File) => {
     if (!file.type.startsWith('video/')) {
       setError('Bitte nur Videodateien hochladen.');
+      setErrorDetails(null);
       return;
     }
+
     setError(null);
+    setErrorDetails(null);
     setUploading(true);
     setProgress(0);
+
+    const maxSize = 500 * 1024 * 1024;
+    if (file.size > maxSize) {
+      setError('Datei zu gross');
+      setErrorDetails(
+        `Deine Datei ist ${(file.size / 1024 / 1024 / 1024).toFixed(2)} GB. ` +
+        `Supabase Storage unterstuetzt maximal 500 MB fuer Direkt-Uploads.\n\n` +
+        `Loesung: Lade die Datei auf einen Cloud-Speicher (Google Drive, Dropbox, etc.) ` +
+        `und nutze den oeffentlichen Link ueber "URL hinzufuegen".`
+      );
+      setUploading(false);
+      return;
+    }
 
     const path = `${roomId}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
 
@@ -34,21 +51,27 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
         .upload(path, file, {
           cacheControl: '3600',
           upsert: false,
-          onUploadProgress: (e) => {
-            if (e.lengthComputable) {
-              setProgress(Math.round((e.loaded / e.total) * 100));
-            }
-          },
         });
 
       if (uploadError) {
-        setError('Upload fehlgeschlagen: ' + uploadError.message);
+        if (uploadError.message.includes('exceeded the maximum allowed size')) {
+          setError('Datei zu gross fuer Supabase Storage');
+          setErrorDetails(
+            'Supabase Storage hat ein Limit von 500 MB pro Datei.\n\n' +
+            'Alternative: Nutze einen externen Datei-Hoster (Google Drive, Dropbox, ' +
+            'OneDrive) und fuege die oeffentliche URL ueber "URL hinzufuegen" hinzu.'
+          );
+        } else {
+          setError('Upload fehlgeschlagen');
+          setErrorDetails(uploadError.message);
+        }
         setUploading(false);
         setProgress(null);
         return;
       }
 
       const { data } = supabase.storage.from('videos').getPublicUrl(path);
+
       await supabase
         .from('rooms')
         .update({ video_url: data.publicUrl, video_name: file.name })
@@ -58,7 +81,8 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
       setProgress(null);
       setUploading(false);
     } catch (err) {
-      setError('Upload fehlgeschlagen. Bitte erneut versuchen.');
+      setError('Upload fehlgeschlagen');
+      setErrorDetails(err instanceof Error ? err.message : 'Unbekannter Fehler');
       setProgress(null);
       setUploading(false);
     }
@@ -68,23 +92,33 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
     const url = urlInput.trim();
     if (!url) {
       setError('Bitte eine URL eingeben.');
+      setErrorDetails(null);
       return;
     }
 
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       setError('Bitte eine gueltige URL eingeben (http:// oder https://).');
+      setErrorDetails(null);
       return;
     }
 
     setError(null);
+    setErrorDetails(null);
     setUploading(true);
 
-    const name = urlName.trim() || 'Externe Video';
+    const name = urlName.trim() || 'Externes Video';
 
-    await supabase
+    const { error: updateError } = await supabase
       .from('rooms')
       .update({ video_url: url, video_name: name })
       .eq('id', roomId);
+
+    if (updateError) {
+      setError('Fehler beim Speichern der URL');
+      setErrorDetails(updateError.message);
+      setUploading(false);
+      return;
+    }
 
     onUploaded(url, name);
     setUploading(false);
@@ -104,10 +138,9 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
 
   return (
     <div className="w-full max-w-xl">
-      {/* Tabs */}
       <div className="flex border-b border-slate-700 mb-4">
         <button
-          onClick={() => setTab('upload')}
+          onClick={() => { setTab('upload'); setError(null); setErrorDetails(null); }}
           className={`flex-1 py-2.5 text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
             tab === 'upload'
               ? 'text-sky-400 border-b-2 border-sky-400'
@@ -118,7 +151,7 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
           Datei hochladen
         </button>
         <button
-          onClick={() => setTab('url')}
+          onClick={() => { setTab('url'); setError(null); setErrorDetails(null); }}
           className={`flex-1 py-2.5 text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
             tab === 'url'
               ? 'text-sky-400 border-b-2 border-sky-400'
@@ -144,7 +177,7 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
               ${uploading ? 'pointer-events-none' : ''}
             `}
           >
-            {progress !== null ? (
+            {uploading ? (
               <Loader2 className="w-10 h-10 text-sky-400 animate-spin" />
             ) : (
               <div className="p-3 bg-sky-900/30 rounded-full">
@@ -153,30 +186,9 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
             )}
 
             <div className="text-center">
-              {progress !== null ? (
-                <p className="text-slate-300 font-medium">Video wird hochgeladen...</p>
-              ) : (
-                <>
-                  <p className="font-medium text-slate-200">Video hier ablegen</p>
-                  <p className="text-sm text-slate-400 mt-1">oder klicken zum Auswaehlen</p>
-                </>
-              )}
+              <p className="font-medium text-slate-200">Video hier ablegen</p>
+              <p className="text-sm text-slate-400 mt-1">oder klicken zum Auswaehlen</p>
             </div>
-
-            {progress !== null && (
-              <div className="w-full max-w-xs mt-2">
-                <div className="flex justify-between text-sm text-slate-300 mb-1">
-                  <span>Hochladen...</span>
-                  <span className="font-medium">{progress}%</span>
-                </div>
-                <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-sky-500 rounded-full transition-all duration-200"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-              </div>
-            )}
 
             <input
               ref={inputRef}
@@ -190,16 +202,23 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
 
           <div className="flex items-center gap-2 text-slate-500 text-sm">
             <Film className="w-4 h-4" />
-            <span>MP4, WebM, OGG — bis zu 2 GB moeglich</span>
+            <span>MP4, WebM, OGG — max. 500 MB</span>
           </div>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
+          <div className="bg-amber-900/20 border border-amber-700/50 rounded-xl p-4 mb-2">
+            <p className="text-amber-200 text-sm">
+              <strong>Hinweis:</strong> Fuer Videos groesser als 500 MB nutze einen Cloud-Speicher
+              (Google Drive, Dropbox, OneDrive) und fuege den oeffentlichen Freigabe-Link hier ein.
+            </p>
+          </div>
+
           <div>
             <label className="text-sm text-slate-400 mb-1.5 block">Video URL *</label>
             <input
               type="url"
-              placeholder="https://example.com/video.mp4"
+              placeholder="https://drive.google.com/file/d/xxx/view oder https://dropbox.com/..."
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleUrlSubmit()}
@@ -225,13 +244,23 @@ export default function UploadZone({ roomId, onUploaded }: UploadZoneProps) {
             {uploading ? 'Wird hinzugefuegt...' : 'Video hinzufuegen'}
           </button>
           <p className="text-xs text-slate-500">
-            Direct-Links zu .mp4, .webm, .ogg Dateien oder Streaming-URLs
+            Direkt-Links (.mp4, .webm) oder geteilte Cloud-Storage Links
           </p>
         </div>
       )}
 
       {error && (
-        <p className="text-sm text-red-400 bg-red-900/20 px-4 py-2 rounded-lg mt-4">{error}</p>
+        <div className="bg-red-900/20 border border-red-700/50 rounded-xl p-4 mt-4">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-red-300 font-medium text-sm">{error}</p>
+              {errorDetails && (
+                <p className="text-red-400/80 text-xs mt-2 whitespace-pre-wrap">{errorDetails}</p>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
